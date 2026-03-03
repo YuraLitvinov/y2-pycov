@@ -4,8 +4,6 @@ import os
 from typing import Dict, Any, List, Optional, cast
 
 from pydantic import BaseModel
-from llama_index.core.tools import FunctionTool
-from llama_index.core.tools.tool_spec.base import BaseToolSpec
 from coverage_tools import discover_tests_ranked, cov_lines_by_test, extended_cov_lines_raw_structure
 
 logger = logging.getLogger(__name__)
@@ -50,7 +48,7 @@ class ExtendedCoveredLinesResponse(BaseModel):
     message: Optional[str] = None
 
 
-class CoverageTool(BaseToolSpec):
+class CoverageTool():
     """Tool for analyzing test coverage and discovering coverage-guided testing opportunities."""
 
     def __init__(self, base_dir: str = None, data_file: str = ".coverage"):
