@@ -1,0 +1,91 @@
+type: Playbook
+model_version: 1
+id: find_useless_tests
+label: Find and Analyze Useless Tests
+description: >-
+  Drive y2-pycov to find coverage-redundant tests via the 0-unique-line algorithm,
+  then (fix mode) file 1-2 remediation works. Coverage redundancy is NOT test
+  redundancy — candidates are recommended, never auto-deleted.
+params:
+  - name: test_paths
+    required: true
+    description: >-
+      Space-separated test roots to measure AND report on. Forwarded to
+      create_extended_coverage.py so the measured suite always contains the reported
+      scope (no test looks 0-unique merely for being unmeasured).
+  - name: fix
+    required: false
+    description: "'yes' to file 1-2 remediation works for the most redundant groups; anything else (default) only reports."
+start: understand
+steps:
+  understand:
+    step_id: understand
+    label: Understand the test scope
+    instruct: >-
+      The scope is the test roots: {test_paths}. Read them and record facts.framework
+      and facts.test_count.
+    next:
+      gather_coverage:
+        when: scope understood
+  gather_coverage:
+    step_id: gather_coverage
+    label: Gather per-test coverage
+    instruct: >-
+      From the project root run:  python y2-pycov/create_extended_coverage.py {test_paths}
+      This measures exactly the roots you will report on and writes y2-pycov/.coverage.
+      Record facts.coverage_generated = 'yes' only if the command succeeded and that
+      file exists.
+    next:
+      analyze:
+        when: coverage generated
+        predicate: .facts.coverage_generated == 'yes'
+  analyze:
+    step_id: analyze
+    label: Analyze for 0-unique-line candidates
+    instruct: >-
+      Run:  python y2-pycov/coverage_report.py --data-file=y2-pycov/.coverage
+      For each test count lines it ALONE covers (hit by exactly one test); a test with
+      0 such lines is a coverage-redundant candidate. Record facts.useless_candidates
+      and facts.scan_complete = 'yes'.
+    next:
+      assess:
+        when: candidates identified
+  assess:
+    step_id: assess
+    label: Group and prioritize
+    instruct: >-
+      Group candidates by test module/class. Coverage redundancy is NOT test
+      redundancy — a 0-unique test may still guard a real regression. Rank groups by
+      size/impact. Record facts.assessed_groups (list of {group, test_ids, reason,
+      priority}) and facts.assessment_complete = 'yes'.
+    next:
+      report:
+        when: assessment complete
+  report:
+    step_id: report
+    label: Report findings
+    instruct: >-
+      Summarize: tests scanned, candidates found, top redundant groups. Recommend,
+      never auto-delete. Record facts.summary and facts.recommendations.
+    next:
+      propose_fixes:
+        when: fix mode is on
+        predicate: .params.fix == 'yes'
+      done:
+        when: fix mode is off (default)
+        predicate: .params.fix != 'yes'
+  propose_fixes:
+    step_id: propose_fixes
+    label: File remediation works
+    instruct: >-
+      Take the 1-2 highest-priority groups from facts.assessed_groups. For each, file
+      ONE work naming exactly which tests to delete or merge and why:
+        $PLUGIN_ROOT/bin/create-work "<group>: remove coverage-redundant tests"
+        --op edit --path <test_file>
+        --accept "redundant tests deleted or merged; suite still green"
+      File at most 2 works. Record facts.works_created (the created work ids).
+  done:
+    step_id: done
+    label: Report only (no fixes requested)
+    instruct: >-
+      Fix mode is off — no remediation works filed. Record facts.fixes_proposed = 'skipped'.
