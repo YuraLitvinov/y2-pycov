@@ -1,3 +1,7 @@
 __pycache__
 *.pyc
 .coverage
+
+# Generated probe artifacts
+.artifacts/
+.artifacts-stable/
