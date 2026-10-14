@@ -133,3 +133,76 @@ def test_report_is_authored_in_y2_pycov():
     """build_report / CoverageReport are authored in the y2-pycov submodule file."""
     assert os.path.join("y2-pycov", "coverage_report.py") in inspect.getfile(build_report)
     assert os.path.join("y2-pycov", "coverage_report.py") in inspect.getfile(CoverageReport)
+
+
+def _write_e2e_coverage_data(tmp_path):
+    data_file = os.path.join(str(tmp_path), ".coverage-e2e")
+    data = CoverageData(basename=data_file)
+    mod_a = os.path.join(str(tmp_path), "pkg", "mod_a.py")
+    mod_b = os.path.join(str(tmp_path), "pkg", "mod_b.py")
+
+    data.set_context("e2e:probe_a")
+    data.add_lines({mod_a: [1, 2], mod_b: [10]})
+    data.set_context("e2e:probe_b")
+    data.add_lines({mod_a: [2, 3]})
+    data.set_context("e2e:probe_c")
+    data.add_lines({mod_a: [4]})
+    data.set_context("test_unit_context")
+    data.add_lines({mod_a: [99]})
+    data.write()
+    return data_file
+
+
+def test_e2e_overlap_report_counts_unique_lines_and_probe_pairs(tmp_path):
+    data_file = _write_e2e_coverage_data(tmp_path)
+    manifest = {
+        "scope": "full_suite",
+        "filtered": False,
+        "run_complete": True,
+        "runner_exit_code": 0,
+        "probe_inventory": ["probe_a", "probe_b", "probe_c"],
+        "selected_probe_ids": ["probe_a", "probe_b", "probe_c"],
+        "probe_statuses": {
+            "probe_a": "passed", "probe_b": "failed", "probe_c": "passed",
+        },
+    }
+
+    report = _report_mod.coverage_tools.build_e2e_probe_overlap_report(
+        data_file, run_manifest=manifest, base_dir=str(tmp_path),
+    )
+
+    assert report["complete"] is True
+    assert report["probe_inventory"]["completed"] == ["probe_a", "probe_b", "probe_c"]
+    probes = {item["probe_id"]: item for item in report["probes"]}
+    assert probes["probe_a"]["covered_source_line_count"] == 3
+    assert probes["probe_a"]["unique_source_line_count"] == 2
+    assert probes["probe_a"]["unique_source_lines"] == [
+        {"file": os.path.join("pkg", "mod_a.py"), "line": 1},
+        {"file": os.path.join("pkg", "mod_b.py"), "line": 10},
+    ]
+    assert probes["probe_b"]["unique_source_line_count"] == 1
+    pairs = {(item["probe_a"], item["probe_b"]): item["shared_source_line_count"]
+             for item in report["overlaps"]}
+    assert pairs[("probe_a", "probe_b")] == 1
+    assert pairs[("probe_a", "probe_c")] == 0
+
+
+def test_e2e_overlap_report_marks_filtered_or_skipped_coverage_incomplete(tmp_path):
+    data_file = _write_e2e_coverage_data(tmp_path)
+    report = _report_mod.coverage_tools.build_e2e_probe_overlap_report(
+        data_file,
+        run_manifest={
+            "scope": "filtered",
+            "filtered": True,
+            "run_complete": False,
+            "probe_inventory": ["probe_a", "probe_b", "probe_c", "probe_d"],
+            "selected_probe_ids": ["probe_a", "probe_d"],
+            "probe_statuses": {"probe_a": "passed", "probe_d": "skipped"},
+        },
+        base_dir=str(tmp_path),
+    )
+
+    assert report["incomplete"] is True
+    assert report["filtered"] is True
+    assert report["probe_inventory"]["skipped"] == ["probe_d"]
+    assert report["probe_inventory"]["missing_coverage_context"] == ["probe_d"]
