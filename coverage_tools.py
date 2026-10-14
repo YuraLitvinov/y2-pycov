@@ -1,6 +1,5 @@
 from coverage import CoverageData
 from collections import defaultdict
-from itertools import combinations
 import sys
 import os
 from typing import List, Dict
@@ -10,7 +9,7 @@ def load_coverage_matrix(data_file=".coverage", context_prefix="test"):
     """Map matching coverage contexts to their covered source lines.
 
     ``context_prefix`` defaults to ``test`` for existing test-coverage consumers.
-    Pass ``e2e:`` to analyze one isolated variant-probe context per probe.
+    Callers can provide any prefix that matches their context naming scheme.
     """
     data = CoverageData(basename=data_file)
     data.read()
@@ -28,87 +27,34 @@ def load_coverage_matrix(data_file=".coverage", context_prefix="test"):
     return test_to_lines
 
 
-def build_e2e_probe_overlap_report(data_file, run_manifest=None, base_dir=None):
-    """Build source-line uniqueness and pairwise overlap for ``e2e:<probe>`` contexts.
+def export_coverage_context(data_file, context, output_file):
+    """Write one context from a coverage database to an independent data file.
 
-    The manifest comes from ``run_variant_probes.py`` and distinguishes a complete
-    unfiltered suite from filtered or interrupted runs. Coverage data alone cannot
-    identify probes that were selected but never executed or had no measured lines.
+    This is context- and path-agnostic so callers can partition coverage for any
+    test or workload without coupling the analysis library to a particular suite.
+    Returns ``False`` when the requested context has no recorded coverage.
     """
-    base = os.path.abspath(base_dir or os.getcwd())
-    matrix = load_coverage_matrix(data_file, context_prefix="e2e:")
-    lines_by_probe = {
-        context.removeprefix("e2e:"): set(lines)
-        for context, lines in matrix.items()
-    }
+    source = CoverageData(basename=data_file)
+    source.read()
+    if context not in source.measured_contexts():
+        return False
 
-    manifest = run_manifest if isinstance(run_manifest, dict) else {}
-    inventory = sorted(set(manifest.get("probe_inventory") or []))
-    selected = sorted(set(manifest.get("selected_probe_ids") or []))
-    statuses = manifest.get("probe_statuses") if isinstance(manifest.get("probe_statuses"), dict) else {}
-    completed = sorted(
-        probe for probe in selected if statuses.get(probe) in {"passed", "failed"}
-    )
-    skipped = sorted(probe for probe in selected if statuses.get(probe) == "skipped")
-    not_run = sorted(set(selected) - set(statuses))
-    covered_by_line = defaultdict(set)
-    for probe, lines in lines_by_probe.items():
-        for line in lines:
-            covered_by_line[line].add(probe)
-
-    probe_ids = sorted(set(inventory) | set(selected) | set(lines_by_probe))
-    probes = []
-    for probe in probe_ids:
-        lines = lines_by_probe.get(probe, set())
-        unique_lines = sorted(
-            (os.path.relpath(path, base), lineno)
-            for path, lineno in lines
-            if covered_by_line[(path, lineno)] == {probe}
-        )
-        probes.append({
-            "probe_id": probe,
-            "status": statuses.get(probe, "not_run"),
-            "covered_source_line_count": len(lines),
-            "unique_source_line_count": len(unique_lines),
-            "unique_source_lines": [
-                {"file": path, "line": lineno} for path, lineno in unique_lines
-            ],
-        })
-
-    overlap_pairs = []
-    measured_probe_ids = sorted(lines_by_probe)
-    for first, second in combinations(measured_probe_ids, 2):
-        overlap_pairs.append({
-            "probe_a": first,
-            "probe_b": second,
-            "shared_source_line_count": len(lines_by_probe[first] & lines_by_probe[second]),
-        })
-
-    filtered = manifest.get("filtered") is True
-    run_complete = manifest.get("run_complete") is True
-    missing_coverage = sorted(set(selected) - set(lines_by_probe))
-    coverage_complete = not missing_coverage
-    complete = run_complete and coverage_complete and not filtered
-    return {
-        "schema_version": 1,
-        "scope": manifest.get("scope", "unknown"),
-        "filtered": filtered,
-        "complete": complete,
-        "incomplete": not complete,
-        "run_complete": run_complete,
-        "coverage_complete": coverage_complete,
-        "runner_exit_code": manifest.get("runner_exit_code"),
-        "probe_inventory": {
-            "available": inventory,
-            "selected": selected,
-            "completed": completed,
-            "skipped": skipped,
-            "not_run": not_run,
-            "missing_coverage_context": missing_coverage,
-        },
-        "probes": probes,
-        "overlaps": overlap_pairs,
-    }
+    os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
+    target = CoverageData(basename=output_file)
+    source.set_query_contexts([context])
+    for filename in source.measured_files():
+        if source.has_arcs():
+            arcs = source.arcs(filename) or []
+            if arcs:
+                target.set_context(context)
+                target.add_arcs({filename: arcs})
+        else:
+            lines = source.lines(filename) or []
+            if lines:
+                target.set_context(context)
+                target.add_lines({filename: lines})
+    target.write()
+    return True
 
 
 def rank_tests_by_line_count(test_to_lines):
