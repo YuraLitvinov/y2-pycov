@@ -89,6 +89,18 @@ Generic context-aware coverage analysis built on the `coverage` package's
 - `extended_cov_lines_raw_structure(filepath, base_dir, data_file)` — per-line test contexts for a file (`{lineno: [test_ctx, ...]}`).
 - `load_coverage_matrix` / `rank_tests_by_line_count` — the underlying primitives.
 - `export_coverage_context(data_file, context, output_file)` — copy one arbitrary context to an independent coverage database.
+- `analyze_named_coverage(test_data_files, base_dir)` — analyze logical tests mapped to one or more independent Coverage.py data files. Multiple process shards for a test are unioned in memory; no shared database or context label is needed. It reports covered/unique source lines and sparse non-zero overlaps.
+
+### Independent data files as logical tests
+
+Some runners cannot reliably attach a shared context to work executed in child
+processes. They can instead write each test's coverage data into an isolated
+directory and pass `{test_id: [data_file, ...]}` to `analyze_named_coverage`.
+The mapping key is the test identity; multiple data files under that key are
+treated as shards from the same test. The analyzer compares canonical source
+paths and line numbers directly and does not create a combined Coverage.py file.
+The existing context-based pytest workflow remains available when tests share one
+coverage database.
 
 ### `coverage_report.py` — token-efficient per-module JSON report
 Built **on top of** `coverage_tools.py` (it calls `extended_cov_lines_raw_structure`).

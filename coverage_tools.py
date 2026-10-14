@@ -1,8 +1,111 @@
 from coverage import CoverageData
 from collections import defaultdict
+from itertools import combinations
 import sys
 import os
-from typing import List, Dict
+from typing import Iterable, List, Dict, Mapping
+
+
+def load_coverage_lines(data_files: Iterable[str]) -> set[tuple[str, int]]:
+    """Load the union of source lines from one or more Coverage.py data files."""
+    lines: set[tuple[str, int]] = set()
+    paths = [os.fspath(path) for path in data_files]
+    if not paths:
+        raise ValueError("at least one coverage data file is required")
+    for path in paths:
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"coverage data file not found: {path}")
+        data = CoverageData(basename=path)
+        data.read()
+        for filename in data.measured_files():
+            canonical = os.path.normcase(os.path.realpath(filename))
+            lines.update((canonical, int(line)) for line in (data.lines(filename) or []))
+    return lines
+
+
+def analyze_named_coverage(
+    test_data_files: Mapping[str, Iterable[str]], base_dir: str | None = None,
+) -> dict:
+    """Analyze independent Coverage.py files as named logical tests.
+
+    Each mapping key is one test identity and its value contains one or more
+    Coverage.py data files produced by that test (for example, multiprocessing
+    shards). Files for one test are unioned in memory; data is never written to
+    or merged into a shared database, and no context naming convention is used.
+
+    The result includes per-test line counts, lines uniquely covered by each
+    test, suite totals, and only non-zero pairwise overlaps. Source paths are
+    canonicalized before comparison so shards created in different processes
+    agree on line identity.
+    """
+    base = os.path.abspath(base_dir or os.getcwd())
+    line_counts: dict[tuple[str, int], int] = defaultdict(int)
+    sole_owner: dict[tuple[str, int], str] = {}
+    covered_counts: dict[str, int] = {}
+    pair_counts: dict[tuple[str, str], int] = defaultdict(int)
+    line_testers: dict[tuple[str, int], list[str]] = defaultdict(list)
+
+    for test_id, raw_paths in sorted(test_data_files.items()):
+        if not isinstance(test_id, str) or not test_id:
+            raise ValueError("test IDs must be non-empty strings")
+        paths = [os.fspath(raw_paths)] if isinstance(raw_paths, (str, os.PathLike)) else [
+            os.fspath(path) for path in raw_paths
+        ]
+        if not paths:
+            raise ValueError(f"test {test_id!r} has no coverage data files")
+
+        try:
+            test_lines = load_coverage_lines(paths)
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(f"coverage data for {test_id!r} not found: {exc}") from exc
+
+        covered_counts[test_id] = len(test_lines)
+        for line in test_lines:
+            line_testers[line].append(test_id)
+            count = line_counts[line]
+            if count == 0:
+                sole_owner[line] = test_id
+            else:
+                sole_owner.pop(line, None)
+            line_counts[line] = count + 1
+
+    # Record only real overlaps. The zero-overlap Cartesian product is
+    # uninformative and can dwarf the coverage data for large suites.
+    for testers in line_testers.values():
+        for pair in combinations(testers, 2):
+            pair_counts[pair] += 1
+
+    unique_by_test: dict[str, list[dict]] = defaultdict(list)
+    for (filename, lineno), owner in sole_owner.items():
+        unique_by_test[owner].append({
+            "file": os.path.relpath(filename, base), "line": lineno,
+        })
+    tests = []
+    suite_line_count = len(line_counts)
+    for test_id in sorted(test_data_files):
+        unique_lines = sorted(unique_by_test.get(test_id, []), key=lambda item: (item["file"], item["line"]))
+        unique_count = len(unique_lines)
+        tests.append({
+            "test_id": test_id,
+            "covered_source_line_count": covered_counts[test_id],
+            "unique_source_line_count": unique_count,
+            "unique_suite_coverage_share_percent": round(100 * unique_count / suite_line_count, 2)
+            if suite_line_count else 0.0,
+            "unique_source_lines": unique_lines,
+        })
+    return {
+        "schema_version": 1,
+        "test_count": len(tests),
+        "suite_covered_source_line_count": suite_line_count,
+        "zero_unique_tests": [
+            row["test_id"] for row in tests if row["unique_source_line_count"] == 0
+        ],
+        "tests": tests,
+        "overlaps": [
+            {"test_a": first, "test_b": second, "shared_source_line_count": count}
+            for (first, second), count in sorted(pair_counts.items())
+        ],
+    }
 
 
 def load_coverage_matrix(data_file=".coverage", context_prefix="test"):

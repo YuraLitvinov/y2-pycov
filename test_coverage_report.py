@@ -159,3 +159,49 @@ def test_export_coverage_context_supports_arbitrary_contexts_and_roots(tmp_path)
     assert _report_mod.coverage_tools.export_coverage_context(
         source_file, "missing:context", os.path.join(str(tmp_path), "missing", ".coverage"),
     ) is False
+
+
+def test_analyze_named_coverage_unions_shards_without_contexts(tmp_path):
+    def write_shard(name, lines):
+        path = tmp_path / name
+        data = CoverageData(basename=str(path))
+        data.add_lines({str(source): values for source, values in lines.items()})
+        data.write()
+        return str(path)
+
+    source_a = tmp_path / "pkg" / "module.py"
+    source_b = tmp_path / "pkg" / "other.py"
+    alpha_one = write_shard("alpha-one.coverage", {source_a: [1, 2]})
+    alpha_two = write_shard("alpha-two.coverage", {source_a: [3], source_b: [10]})
+    beta = write_shard("beta.coverage", {source_a: [2, 3]})
+    gamma = write_shard("gamma.coverage", {source_a: [5]})
+
+    result = _report_mod.coverage_tools.analyze_named_coverage(
+        {"alpha": [alpha_one, alpha_two], "beta": [beta], "gamma": [gamma]},
+        base_dir=str(tmp_path),
+    )
+
+    assert result["test_count"] == 3
+    assert result["suite_covered_source_line_count"] == 5
+    tests = {row["test_id"]: row for row in result["tests"]}
+    assert tests["alpha"]["covered_source_line_count"] == 4
+    assert tests["alpha"]["unique_source_line_count"] == 2
+    assert tests["alpha"]["unique_source_lines"] == [
+        {"file": "pkg/module.py", "line": 1},
+        {"file": "pkg/other.py", "line": 10},
+    ]
+    assert tests["beta"]["unique_source_line_count"] == 0
+    assert tests["gamma"]["unique_source_line_count"] == 1
+    assert result["zero_unique_tests"] == ["beta"]
+    assert result["overlaps"] == [
+        {"test_a": "alpha", "test_b": "beta", "shared_source_line_count": 2},
+    ]
+
+
+def test_analyze_named_coverage_rejects_missing_shard(tmp_path):
+    import pytest
+
+    with pytest.raises(FileNotFoundError, match="coverage data for 'probe' not found"):
+        _report_mod.coverage_tools.analyze_named_coverage(
+            {"probe": [str(tmp_path / "missing.coverage")]},
+        )
