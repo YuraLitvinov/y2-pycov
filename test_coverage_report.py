@@ -205,3 +205,29 @@ def test_analyze_named_coverage_rejects_missing_shard(tmp_path):
         _report_mod.coverage_tools.analyze_named_coverage(
             {"probe": [str(tmp_path / "missing.coverage")]},
         )
+
+
+def test_analyze_named_coverage_bitset_overlap_across_byte_boundaries(tmp_path):
+    source = tmp_path / "pkg" / "many_lines.py"
+
+    def write_data(name, lines):
+        path = tmp_path / name
+        data = CoverageData(basename=str(path))
+        data.add_lines({str(source): lines})
+        data.write()
+        return str(path)
+
+    first = write_data("first.coverage", list(range(1, 521)))
+    second = write_data("second.coverage", [1, 8, 9, 255, 256, 519, 520, 521])
+
+    result = _report_mod.coverage_tools.analyze_named_coverage(
+        {"first": [first], "second": [second]}, base_dir=str(tmp_path),
+    )
+
+    tests = {row["test_id"]: row for row in result["tests"]}
+    assert result["suite_covered_source_line_count"] == 521
+    assert tests["first"]["unique_source_line_count"] == 513
+    assert tests["second"]["unique_source_line_count"] == 1
+    assert result["overlaps"] == [
+        {"test_a": "first", "test_b": "second", "shared_source_line_count": 7},
+    ]

@@ -1,6 +1,5 @@
 from coverage import CoverageData
 from collections import defaultdict
-from itertools import combinations
 import sys
 import os
 from typing import Iterable, List, Dict, Mapping
@@ -39,11 +38,10 @@ def analyze_named_coverage(
     agree on line identity.
     """
     base = os.path.abspath(base_dir or os.getcwd())
-    line_counts: dict[tuple[str, int], int] = defaultdict(int)
+    line_ids: dict[tuple[str, int], int] = {}
     sole_owner: dict[tuple[str, int], str] = {}
     covered_counts: dict[str, int] = {}
-    pair_counts: dict[tuple[str, str], int] = defaultdict(int)
-    line_testers: dict[tuple[str, int], list[str]] = defaultdict(list)
+    test_masks: dict[str, bytearray] = {}
 
     for test_id, raw_paths in sorted(test_data_files.items()):
         if not isinstance(test_id, str) or not test_id:
@@ -60,20 +58,38 @@ def analyze_named_coverage(
             raise FileNotFoundError(f"coverage data for {test_id!r} not found: {exc}") from exc
 
         covered_counts[test_id] = len(test_lines)
+        mask = bytearray()
         for line in test_lines:
-            line_testers[line].append(test_id)
-            count = line_counts[line]
-            if count == 0:
+            line_id = line_ids.get(line)
+            if line_id is None:
+                line_id = len(line_ids)
+                line_ids[line] = line_id
                 sole_owner[line] = test_id
             else:
                 sole_owner.pop(line, None)
-            line_counts[line] = count + 1
+            byte_index = line_id >> 3
+            if byte_index >= len(mask):
+                mask.extend(b"\0" * (byte_index + 1 - len(mask)))
+            mask[byte_index] |= 1 << (line_id & 7)
+        test_masks[test_id] = mask
 
-    # Record only real overlaps. The zero-overlap Cartesian product is
-    # uninformative and can dwarf the coverage data for large suites.
-    for testers in line_testers.values():
-        for pair in combinations(testers, 2):
-            pair_counts[pair] += 1
+    # Store each logical test's covered lines as a compact bitset. Computing
+    # intersections in C via Python's big-integer bit operations avoids walking
+    # every pair of test IDs once for every commonly covered line. The old
+    # line-to-test-list loop became prohibitively expensive for large suites.
+    mask_size = (len(line_ids) + 7) // 8
+    integer_masks = {
+        test_id: int.from_bytes(mask.ljust(mask_size, b"\0"), byteorder="little")
+        for test_id, mask in test_masks.items()
+    }
+    pair_counts: dict[tuple[str, str], int] = {}
+    test_ids = sorted(test_data_files)
+    for index, first in enumerate(test_ids):
+        first_mask = integer_masks[first]
+        for second in test_ids[index + 1:]:
+            shared_count = (first_mask & integer_masks[second]).bit_count()
+            if shared_count:
+                pair_counts[(first, second)] = shared_count
 
     unique_by_test: dict[str, list[dict]] = defaultdict(list)
     for (filename, lineno), owner in sole_owner.items():
@@ -81,7 +97,7 @@ def analyze_named_coverage(
             "file": os.path.relpath(filename, base), "line": lineno,
         })
     tests = []
-    suite_line_count = len(line_counts)
+    suite_line_count = len(line_ids)
     for test_id in sorted(test_data_files):
         unique_lines = sorted(unique_by_test.get(test_id, []), key=lambda item: (item["file"], item["line"]))
         unique_count = len(unique_lines)
